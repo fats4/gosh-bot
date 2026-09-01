@@ -243,6 +243,49 @@ Automasi chat bisa melanggar Terms of Service Gosh. Gunakan dengan risiko sendir
 
 ---
 
+## Upload ke GitHub
+
+Repo lokal sudah siap (`git init` + commit). File rahasia (`config.json`, `cookies.json`) **tidak** ikut ter-upload berkat `.gitignore`.
+
+### Opsi A — GitHub CLI (disarankan)
+
+```bash
+cd gosh-bot
+
+# Login GitHub (buka browser)
+gh auth login
+
+# Buat repo public dan push sekaligus
+gh repo create gosh-bot --public --source=. --remote=origin --push \
+  --description "Gosh Live bot — auto-reply absen di live penonton yang komen"
+```
+
+### Opsi B — Manual lewat website
+
+1. Buka [github.com/new](https://github.com/new)
+2. Nama repo: `gosh-bot` (Public atau Private)
+3. **Jangan** centang "Add a README" (sudah ada di lokal)
+4. Klik **Create repository**
+5. Di terminal:
+
+```bash
+cd gosh-bot
+git remote add origin https://github.com/USERNAME/gosh-bot.git
+git push -u origin main
+```
+
+Ganti `USERNAME` dengan username GitHub kamu.
+
+### Update setelah ada perubahan
+
+```bash
+git add .
+git commit -m "Deskripsi perubahan"
+git push
+```
+
+---
+
 ## Lisensi
 
 MIT
