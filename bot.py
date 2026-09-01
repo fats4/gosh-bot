@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,34 @@ def load_config(path: str) -> dict:
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
+def _extract_comment_text(text_data: dict) -> str | None:
+    """Ambil teks komentar, termasuk emoji custom Gosh ([emoji:id])."""
+    text = (text_data.get("text") or "").strip()
+    rich = text_data.get("rich_content") or []
+
+    if text and "[emoji:" not in text:
+        return text
+
+    if rich:
+        parts: list[str] = []
+        for item in rich:
+            item_type = item.get("type")
+            if item_type == "text":
+                part = (item.get("text") or "").strip()
+                if part:
+                    parts.append(part)
+            elif item_type == "emoji":
+                emoji_id = item.get("emoji_id")
+                parts.append(f"[emoji:{emoji_id}]" if emoji_id else "[emoji]")
+        if parts:
+            return "".join(parts)
+
+    if text:
+        return text
+
+    return None
+
+
 def parse_chat_message(raw_msg: dict) -> dict | None:
     payload = raw_msg.get("payload") or {}
     data_str = payload.get("data")
@@ -46,8 +75,8 @@ def parse_chat_message(raw_msg: dict) -> dict | None:
 
     user = inner.get("user") or {}
     text_data = inner.get("data") or {}
-    text = text_data.get("text", "").strip()
-    if not text or text.startswith("[emoji:"):
+    text = _extract_comment_text(text_data)
+    if not text:
         return None
 
     return {
@@ -57,6 +86,7 @@ def parse_chat_message(raw_msg: dict) -> dict | None:
         "sequence": raw_msg.get("sequence"),
         "bot_type": user.get("bot_type", 0),
         "live_id": str(inner.get("live_id") or ""),
+        "is_emoji": bool(re.search(r"\[emoji:\d+\]", text)),
     }
 
 
@@ -144,7 +174,7 @@ def main() -> int:
                 parsed = parse_chat_message(raw_msg)
                 if not parsed:
                     if verbose:
-                        log.info("Lewati pesan non-teks seq=%s", sequence)
+                        log.info("Lewati pesan non-komentar seq=%s", sequence)
                     continue
 
                 commenter_id = parsed["user_id"]

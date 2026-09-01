@@ -9,6 +9,7 @@ Contoh: seseorang komen di live kamu → bot masuk ke live mereka → kirim `"ab
 ## Fitur
 
 - Pantau komentar baru di channel kamu (online/offline)
+- Deteksi komentar teks **dan emoji custom Gosh** (`[emoji:id]`)
 - Balas otomatis di live penonton yang komen
 - Cooldown per user (anti-spam)
 - Login email/password via API Gosh
