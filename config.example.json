@@ -1,0 +1,15 @@
+{
+  "anchor_id": "15887479",
+  "reply_message": "absen kak, hadir",
+  "poll_interval_seconds": 3,
+  "cooldown_per_user_seconds": 300,
+  "skip_bot_accounts": false,
+  "verbose_polling": false,
+  "use_saved_session": false,
+  "sm_box_id": "ISI_DARI_BROWSER_LIHAT_get_sm_box_id.py",
+  "login": {
+    "email": "email@gosh.com",
+    "password": "password-kamu"
+  },
+  "cookies_file": "cookies.json"
+}

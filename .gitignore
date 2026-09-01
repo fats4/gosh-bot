@@ -1,0 +1,25 @@
+# Secrets — jangan pernah di-upload
+config.json
+cookies.json
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# File riset/reverse-engineering (bukan bagian bot)
+*.js
+!tim_send.js

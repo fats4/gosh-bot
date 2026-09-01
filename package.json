@@ -1,0 +1,16 @@
+{
+  "name": "gosh-bot",
+  "version": "1.0.0",
+  "description": "Bot ini memantau komentar di live kamu di Gosh, lalu otomatis membalas **\"absen kak, hadir\"** di live orang yang komen.",
+  "main": "ch36893.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@tencentcloud/chat": "^3.6.7",
+    "ws": "^8.21.3"
+  }
+}
