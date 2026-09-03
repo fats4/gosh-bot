@@ -5,14 +5,18 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import platform as py_platform
 import re
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urljoin, urlencode
+
+import requests
 
 import requests
 
@@ -32,6 +36,24 @@ LOGIN_ERROR_MESSAGES = {
     ),
 }
 
+RATE_LIMIT_CODE = 2008
+
+log = logging.getLogger("gosh-bot")
+
+
+class GoshApiError(RuntimeError):
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _raise_api_error(payload: dict[str, Any], *, action: str = "API") -> None:
+    code = int(payload.get("code") or 0)
+    if code == 0:
+        return
+    detail = payload.get("toast") or payload.get("message") or payload
+    raise GoshApiError(code, f"{action} gagal (code {code}): {detail}")
+
 
 class GoshClient:
     API_BASE = "https://api.gosh.com"
@@ -39,6 +61,9 @@ class GoshClient:
     WEB_SECRET = "7QmC2ZL9A8xKfR4P"
     PC_SECRET = "A7fQ9K2mX8Zp4R3L"
     TIM_SEND_SCRIPT = Path(__file__).with_name("tim_send.js")
+    TIM_WATCH_SCRIPT = Path(__file__).with_name("tim_watch.js")
+    BROWSER_WATCH_SCRIPT = Path(__file__).with_name("browser_watch.js")
+    BROWSER_WATCH_KEEP_SCRIPT = Path(__file__).with_name("browser_watch_keep.js")
 
     DEFAULT_QUERY = {
         "app": "kick",
@@ -57,8 +82,13 @@ class GoshClient:
         cookies_file: str | None = None,
         *,
         load_cookies: bool = True,
+        proxy: str | None = None,
     ) -> None:
         self.session = requests.Session()
+        self.proxy = (proxy or "").strip() or None
+        if self.proxy:
+            proxy_url = self.proxy if "://" in self.proxy else f"http://{self.proxy}"
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
         self.session.headers.update(
             {
                 "Content-Type": "application/json",
@@ -278,8 +308,9 @@ class GoshClient:
             code = payload.get("code")
             hint = LOGIN_ERROR_MESSAGES.get(code, "")
             detail = payload.get("toast") or payload.get("message") or payload
-            raise RuntimeError(
-                f"Login gagal (code {code}): {detail}.{f' {hint}' if hint else ''}"
+            raise GoshApiError(
+                int(code),
+                f"Login gagal (code {code}): {detail}.{f' {hint}' if hint else ''}",
             )
 
         self._apply_session(payload.get("data") or {})
@@ -364,8 +395,19 @@ class GoshClient:
         )
         response.raise_for_status()
         payload = response.json()
-        if payload.get("code") != 0:
-            raise RuntimeError(f"fetch_msg gagal: {payload}")
+        _raise_api_error(payload, action="fetch_msg")
+        return payload.get("data") or {}
+
+    def follow_user(self, user_id: str) -> dict[str, Any]:
+        """Follow user Gosh (target_uid)."""
+        response = self._request(
+            "POST",
+            "/gosh_social/app/relationship/follow",
+            json_body={"target_uid": int(user_id)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        _raise_api_error(payload, action="Follow")
         return payload.get("data") or {}
 
     def get_commenter_room(self, user_id: str) -> dict[str, Any] | None:
@@ -432,11 +474,303 @@ class GoshClient:
             return None
         return live
 
+    @staticmethod
+    def _make_instance_id() -> str:
+        return f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:16]}"
+
+    def join_live(self, live_id: str) -> bool:
+        """Daftar sebagai penonton live (menambah view). Gagal diam-diam jika diblokir."""
+        body = {
+            "live_id": int(live_id),
+            "instance_id": self._make_instance_id(),
+        }
+        try:
+            response = self._request(
+                "POST",
+                "/gosh_base/app/live/join",
+                json_body=body,
+            )
+            if response.status_code == 401:
+                return False
+            response.raise_for_status()
+            payload = response.json()
+            return int(payload.get("code") or 0) == 0
+        except (requests.RequestException, ValueError, TypeError):
+            return False
+
+    def _cookies_for_browser(self) -> list[dict[str, str]]:
+        return [
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain or ".gosh.com",
+                "path": cookie.path or "/",
+            }
+            for cookie in self.session.cookies
+        ]
+
+    def _watch_via_browser(
+        self,
+        anchor_id: str,
+        seconds: float,
+        stop_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
+        if seconds <= 0 or not self.BROWSER_WATCH_SCRIPT.exists():
+            return None
+
+        payload = {
+            "url": f"https://gosh.com/{anchor_id}",
+            "watch_seconds": seconds,
+            "cookies": self._cookies_for_browser(),
+            "user_agent": self.session.headers.get("User-Agent"),
+            "proxy": self.proxy,
+        }
+        timeout = max(int(seconds) + 90, 90)
+        if stop_event and stop_event.wait(0):
+            return None
+
+        try:
+            proc = subprocess.run(
+                ["node", str(self.BROWSER_WATCH_SCRIPT)],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            log.warning("Browser watch gagal: %s", exc)
+            return None
+
+        output = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            err = (proc.stderr or output or "").strip()
+            log.warning("Browser watch error: %s", err[:200])
+            return None
+
+        for line in reversed(output.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    def start_own_live_viewer(self, anchor_id: str) -> subprocess.Popen | None:
+        """Jalankan browser headless persisten di live sendiri (boost penonton)."""
+        if not self.BROWSER_WATCH_KEEP_SCRIPT.exists():
+            return None
+        payload = {
+            "url": f"https://gosh.com/{anchor_id}",
+            "cookies": self._cookies_for_browser(),
+            "user_agent": self.session.headers.get("User-Agent"),
+            "proxy": self.proxy,
+        }
+        try:
+            proc = subprocess.Popen(
+                ["node", str(self.BROWSER_WATCH_KEEP_SCRIPT)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if proc.stdin:
+                proc.stdin.write(json.dumps(payload))
+                proc.stdin.close()
+            return proc
+        except FileNotFoundError:
+            return None
+
+    def _watch_hls_stream(
+        self,
+        hls_url: str,
+        seconds: float,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        deadline = time.time() + seconds
+        session = requests.Session()
+        if self.proxy:
+            proxy_url = self.proxy if "://" in self.proxy else f"http://{self.proxy}"
+            session.proxies.update({"http": proxy_url, "https": proxy_url})
+        session.headers.update(
+            {
+                "User-Agent": self.session.headers.get("User-Agent", ""),
+                "Referer": "https://gosh.com/",
+            }
+        )
+
+        while time.time() < deadline:
+            if stop_event and stop_event.is_set():
+                return
+            try:
+                response = session.get(hls_url, timeout=15)
+                response.raise_for_status()
+                lines = response.text.splitlines()
+                media_path = None
+                for index, line in enumerate(lines):
+                    if line.startswith("#EXT-X-STREAM-INF") and "360p" in line:
+                        if index + 1 < len(lines):
+                            media_path = lines[index + 1].strip()
+                        break
+                if not media_path:
+                    for line in lines:
+                        if line and not line.startswith("#"):
+                            media_path = line.strip()
+                            break
+                if not media_path:
+                    time.sleep(2)
+                    continue
+
+                media_url = (
+                    media_path
+                    if media_path.startswith("http")
+                    else urljoin(hls_url.rsplit("/", 1)[0] + "/", media_path)
+                )
+                playlist = session.get(media_url, timeout=15)
+                playlist.raise_for_status()
+                segments = [
+                    line.strip()
+                    for line in playlist.text.splitlines()
+                    if line and not line.startswith("#")
+                ]
+                for segment in segments[-2:]:
+                    if time.time() >= deadline:
+                        return
+                    segment_url = (
+                        segment
+                        if segment.startswith("http")
+                        else urljoin(media_url.rsplit("/", 1)[0] + "/", segment)
+                    )
+                    with session.get(segment_url, timeout=20, stream=True) as seg_resp:
+                        seg_resp.raise_for_status()
+                        for chunk in seg_resp.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            if time.time() >= deadline:
+                                return
+                            if stop_event and stop_event.is_set():
+                                return
+            except requests.RequestException:
+                pass
+            time.sleep(2)
+
+    def _watch_via_tim(
+        self,
+        group_id: str,
+        live_id: str,
+        seconds: float,
+    ) -> None:
+        if seconds <= 0 or not self.tim_user_sig or not self.uid:
+            return
+        if not self.TIM_WATCH_SCRIPT.exists():
+            return
+        payload = {
+            "sdkappid": TIM_SDK_APP_ID,
+            "userid": self.uid,
+            "usersig": self.tim_user_sig,
+            "group_id": group_id,
+            "live_id": live_id,
+            "watch_seconds": seconds,
+        }
+        timeout = max(int(seconds) + 45, 60)
+        try:
+            subprocess.run(
+                ["node", str(self.TIM_WATCH_SCRIPT)],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+
+    def _heartbeat_live_data(
+        self,
+        live_id: str,
+        seconds: float,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if stop_event and stop_event.is_set():
+                return
+            try:
+                self._request(
+                    "GET",
+                    "/gosh_base/app/live/live_data",
+                    extra_query={"live_id": live_id},
+                )
+            except requests.RequestException:
+                pass
+            time.sleep(5)
+
+    def watch_live(
+        self,
+        room: dict[str, Any],
+        *,
+        group_id: str,
+        live_id: str,
+        anchor_id: str,
+        seconds: float,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        """Nonton live via browser headless (live/join resmi) sebelum absen."""
+        if seconds <= 0:
+            return
+
+        result = self._watch_via_browser(anchor_id, seconds, stop_event)
+        if result:
+            joins = result.get("join_results") or []
+            ok_joins = [item for item in joins if item.get("status") == 200]
+            if ok_joins:
+                log.info(
+                    "Browser watch uid=%s live=%s join OK (%ss)",
+                    self.uid,
+                    anchor_id,
+                    int(seconds),
+                )
+                return
+
+        log.warning(
+            "Browser watch uid=%s live=%s fallback HLS/TIM",
+            self.uid,
+            anchor_id,
+        )
+        workers: list[threading.Thread] = []
+
+        hls_url = room.get("hls_addr") or room.get("flv_addr")
+        if hls_url:
+            workers.append(
+                threading.Thread(
+                    target=self._watch_hls_stream,
+                    args=(str(hls_url), seconds, stop_event),
+                    daemon=True,
+                )
+            )
+
+        if group_id:
+            workers.append(
+                threading.Thread(
+                    target=self._watch_via_tim,
+                    args=(group_id, live_id, seconds),
+                    daemon=True,
+                )
+            )
+
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+
     def _send_via_tim(
         self,
         group_id: str,
         live_id: str,
         text: str,
+        *,
+        watch_seconds: float = 0,
     ) -> dict[str, Any]:
         if not self.tim_user_sig or not self.uid:
             raise RuntimeError("tim_user_sig tidak ada. Login ulang.")
@@ -456,14 +790,16 @@ class GoshClient:
             "live_id": live_id,
             "text": text,
             "user": self.user_profile,
+            "watch_seconds": watch_seconds,
         }
+        timeout = max(int(watch_seconds) + 45, 45)
         try:
             proc = subprocess.run(
                 ["node", str(self.TIM_SEND_SCRIPT)],
                 input=json.dumps(payload),
                 capture_output=True,
                 text=True,
-                timeout=45,
+                timeout=timeout,
                 check=False,
             )
         except FileNotFoundError as exc:
@@ -506,10 +842,16 @@ class GoshClient:
         text: str,
         *,
         group_id: str | None = None,
+        watch_seconds: float = 0,
     ) -> dict[str, Any]:
         del anchor_id
         if not group_id:
             raise RuntimeError("Group chat penonton tidak ditemukan.")
         if not live_id:
             raise RuntimeError("Live ID penonton tidak ditemukan.")
-        return self._send_via_tim(group_id, live_id, text)
+        return self._send_via_tim(
+            group_id,
+            live_id,
+            text,
+            watch_seconds=watch_seconds,
+        )

@@ -1,15 +1,48 @@
 {
-  "anchor_id": "15887479",
-  "reply_message": "absen kak, hadir",
-  "poll_interval_seconds": 3,
-  "cooldown_per_user_seconds": 300,
+  "reply_from_name": "Faats [KNJ 05]",
+  "randomize_reply": true,
+  "reply_message": "absen kak, hadir dari Faats [KNJ 05]",
+  "reply_messages": [
+    "absen kak, hadir dari {from_name}",
+    "wak hadir bang, absen dari {from_name}",
+    "hadir kak, absen {from_name}",
+    "absen kak, {from_name} hadir",
+    "hadir bang, absen dari {from_name} ya"
+  ],
+  "poll_interval_seconds": 0,
+  "cooldown_per_user_seconds": 0,
   "skip_bot_accounts": false,
+  "skip_fleet_accounts": true,
+  "auto_follow_on_comment": true,
+  "watch_before_comment_seconds": 15,
+  "boost_own_live_viewers": true,
+  "reply_stagger_min_seconds": 5,
+  "reply_stagger_max_seconds": 15,
+  "rate_limit_retry_min_seconds": 15,
+  "rate_limit_retry_max_seconds": 30,
+  "min_poll_interval_seconds": 2,
   "verbose_polling": false,
   "use_saved_session": false,
   "sm_box_id": "ISI_DARI_BROWSER_LIHAT_get_sm_box_id.py",
-  "login": {
-    "email": "email@gosh.com",
-    "password": "password-kamu"
-  },
-  "cookies_file": "cookies.json"
+  "accounts": [
+    {
+      "name": "bot1",
+      "anchor_id": "15887479",
+      "proxy": "123.45.67.89:8080",
+      "login": {
+        "email": "akun1@gmail.com",
+        "password": "password-akun1"
+      },
+      "cookies_file": "cookies_bot1.json"
+    },
+    {
+      "name": "bot2",
+      "anchor_id": "15887479",
+      "proxy": "http://user:pass@98.76.54.32:8080",
+        "email": "akun2@gmail.com",
+        "password": "password-akun2"
+      },
+      "cookies_file": "cookies_bot2.json"
+    }
+  ]
 }

@@ -42,6 +42,7 @@ async function main() {
   const group_id = cfg.group_id;
   const text = cfg.text;
   const live_id = cfg.live_id != null ? String(cfg.live_id) : "0";
+  const watch_seconds = Number(cfg.watch_seconds || 0);
   const user = cfg.user;
   if (!sdkappid || !userid || !usersig || !group_id || !text || !user) {
     throw new Error(
@@ -62,6 +63,10 @@ async function main() {
     if (code !== 10013 && code !== 10010 && msg.indexOf("already") === -1) {
       throw err;
     }
+  }
+
+  if (watch_seconds > 0) {
+    await new Promise((resolve) => setTimeout(resolve, watch_seconds * 1000));
   }
 
   const now = Math.floor(Date.now() / 1000);

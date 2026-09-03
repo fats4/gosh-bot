@@ -1,6 +1,7 @@
 # Secrets — jangan pernah di-upload
 config.json
 cookies.json
+cookies_*.json
 .env
 .env.*
 
@@ -20,6 +21,13 @@ node_modules/
 .idea/
 .vscode/
 
+# Log runtime
+bot.log
+
 # File riset/reverse-engineering (bukan bagian bot)
 *.js
 !tim_send.js
+!tim_watch.js
+!browser_watch.js
+!browser_watch_keep.js
+!proxy_helper.js
