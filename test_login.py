@@ -32,10 +32,10 @@ def test_account(account: dict) -> bool:
     return True
 
 
-def main() -> int:
-    config_path = Path(sys.argv[1] if len(sys.argv) > 1 else "config.json")
+def run_login_tests(config_path: str = "config.json") -> int:
+    path = Path(config_path)
     try:
-        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        cfg = json.loads(path.read_text(encoding="utf-8"))
         accounts = resolve_accounts(cfg)
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         print(f"Config error: {exc}")
@@ -48,6 +48,11 @@ def main() -> int:
 
     print(f"\nHasil: {ok}/{len(accounts)} akun berhasil login")
     return 0 if ok == len(accounts) else 1
+
+
+def main() -> int:
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
+    return run_login_tests(config_path)
 
 
 if __name__ == "__main__":

@@ -825,13 +825,24 @@ def run_comment_poller(
                 stop_event.wait(poll_interval)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Gosh Live bot absen otomatis")
-    parser.add_argument("-c", "--config", default="config.json", help="Path config JSON")
-    args = parser.parse_args()
-
+def run_bot(config_path: str = "config.json") -> int:
+    """Jalankan bot multi-akun. Dipanggil dari bot.py atau gosh.py."""
     try:
-        config = load_config(args.config)
+        config = load_config(config_path)
+        if config.get("proxy_list_file"):
+            try:
+                from setup_config import sync_proxies_from_file
+
+                assigned, total = sync_proxies_from_file(config)
+                log.info(
+                    "Proxy dari %s: %d akun ← %d proxy (file punya %d unik)",
+                    config.get("proxy_list_file"),
+                    assigned,
+                    assigned,
+                    total,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                log.warning("Proxy file: %s", exc)
         accounts = resolve_accounts(config)
     except (FileNotFoundError, ValueError) as exc:
         log.error("%s", exc)
@@ -910,6 +921,13 @@ def main() -> int:
         return 0
 
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Gosh Live bot absen otomatis")
+    parser.add_argument("-c", "--config", default="config.json", help="Path config JSON")
+    args = parser.parse_args()
+    return run_bot(args.config)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ node_modules/
 # Log runtime
 bot.log
 
+# Proxy list (download dari ProxyScrape)
+proxies.txt
+
 # File riset/reverse-engineering (bukan bagian bot)
 *.js
 !tim_send.js
