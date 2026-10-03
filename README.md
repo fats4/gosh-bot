@@ -31,6 +31,12 @@ Contoh: seseorang komen di live kamu → bot masuk ke live mereka → kirim `"ab
 
 ---
 
+## Untuk AI agent / Cursor
+
+Panduan setup otomatis (anchor, proxy, mode boost-only, troubleshooting): **[AGENTS.md](AGENTS.md)**.
+
+---
+
 ## Instalasi cepat
 
 ```bash

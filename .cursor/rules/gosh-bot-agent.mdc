@@ -1,0 +1,24 @@
+---
+description: Setup dan operasi Gosh Live Bot (config, anchor, proxy, boost viewer)
+alwaysApply: true
+---
+
+# Gosh Bot — instruksi agent
+
+Baca **AGENTS.md** di root repo sebelum mengubah config atau menjalankan bot.
+
+## Prioritas
+
+1. Jangan commit `config.json`, `proxies.txt`, `cookies_*.json`, atau credential.
+2. Setelah ubah config, jalankan: `python3 gosh.py config validate` dan `python3 gosh.py login test` bila akun/login berubah.
+3. Ganti anchor: update semua `accounts[].anchor_id` **atau** `python3 gosh.py run -a <ID> -d` (menyimpan ke config).
+4. Profil baru di CLI: tambah tuple di `gosh.py` → `ANCHOR_PRESETS` (id + label) dan update tabel di AGENTS.md.
+5. Boost viewer stabil = `boost_viewer_use_proxy: false` (VPS langsung). Proxy untuk login/API saja kecuali user minta eksperimen.
+6. Email login: prefer Gmail; domain disposable sering gagal (1077).
+7. Stop bot: `python3 gosh.py stop` — cek tidak ada sisa `browser_watch_keep`.
+
+## CLI singkat
+
+`gosh.py status` · `run -d` · `stop` · `login test` · `config proxy from-file` · `config proxy test`
+
+Log sukses boost: `live/join OK` di `bot.log`.
