@@ -93,6 +93,7 @@ Lalu set `anchor_id` di semua entry `accounts` di `config.json`, atau tambah ke 
 "auto_reply_on_comment": false,
 "boost_own_live_viewers": true,
 "boost_viewer_use_proxy": false,
+"boost_viewer_sequential": true,
 "auto_follow_anchor": true,
 "watch_before_comment_seconds": 0
 ```
@@ -163,7 +164,7 @@ save_config(path, cfg)
 
 1. **Penonton live naik** hanya jika browser POST **`/gosh_base/app/live/join`** sukses → log: `Viewer live sendiri terdaftar (live/join OK)`.
 2. **Browser boost** di `gosh_client.start_own_live_viewer()` — proxy default off.
-3. **Multi-akun:** ~8–10 Chrome di VPS 4 core / 8 GB RAM lebih stabil; 15+ sering gagal join (CPU penuh).
+3. **Multi-akun:** default **boost antrian** (`boost_viewer_sequential: true`) — satu browser join sampai `live/join OK`, baru akun berikutnya. ~8–10 akun di VPS 4 core / 8 GB lebih stabil.
 4. Setelah `stop` bot, cek sisa: `pgrep -af browser_watch_keep` — jika ada, `python3 gosh.py stop`.
 
 ---

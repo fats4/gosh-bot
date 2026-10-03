@@ -20,6 +20,7 @@
   "watch_before_comment_seconds": 15,
   "boost_own_live_viewers": true,
   "boost_viewer_use_proxy": false,
+  "boost_viewer_sequential": true,
   "reply_stagger_min_seconds": 5,
   "reply_stagger_max_seconds": 15,
   "rate_limit_retry_min_seconds": 15,

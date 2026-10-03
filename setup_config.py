@@ -39,6 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "watch_before_comment_seconds": 15,
     "boost_own_live_viewers": True,
     "boost_viewer_use_proxy": False,
+    "boost_viewer_sequential": True,
     "reply_stagger_min_seconds": 5,
     "reply_stagger_max_seconds": 15,
     "rate_limit_retry_min_seconds": 15,
@@ -73,6 +74,7 @@ GLOBAL_BOOL_KEYS = (
     "auto_reply_on_comment",
     "boost_own_live_viewers",
     "boost_viewer_use_proxy",
+    "boost_viewer_sequential",
     "verbose_polling",
     "use_saved_session",
 )

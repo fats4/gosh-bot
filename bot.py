@@ -61,6 +61,7 @@ ACCOUNT_KEYS = (
     "watch_before_comment_seconds",
     "boost_own_live_viewers",
     "boost_viewer_use_proxy",
+    "boost_viewer_sequential",
     "reply_stagger_min_seconds",
     "reply_stagger_max_seconds",
     "rate_limit_retry_min_seconds",
@@ -125,6 +126,7 @@ def _merge_account(global_cfg: dict, account_cfg: dict, index: int) -> dict:
     merged.setdefault("watch_before_comment_seconds", 15)
     merged.setdefault("boost_own_live_viewers", True)
     merged.setdefault("boost_viewer_use_proxy", False)
+    merged.setdefault("boost_viewer_sequential", True)
     merged.setdefault("reply_stagger_min_seconds", 5)
     merged.setdefault("reply_stagger_max_seconds", 15)
     merged.setdefault("rate_limit_retry_min_seconds", 15)
@@ -342,6 +344,40 @@ class SharedCommentFeed:
                     return None
 
 
+class BoostJoinCoordinator:
+    """Boost viewer satu per satu: akun berikutnya start setelah join terkonfirmasi."""
+
+    def __init__(self, account_names: list[str]) -> None:
+        self._order = list(account_names)
+        self._next_index = 0
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._active: str | None = None
+
+    def wait_turn(self, account_name: str, stop_event: threading.Event) -> bool:
+        with self._condition:
+            while True:
+                if stop_event.is_set():
+                    return False
+                if (
+                    self._next_index < len(self._order)
+                    and self._order[self._next_index] == account_name
+                    and self._active is None
+                ):
+                    self._active = account_name
+                    return True
+                self._condition.wait(timeout=0.5)
+
+    def finish_turn(self, account_name: str, *, joined: bool) -> None:
+        with self._condition:
+            if self._active != account_name:
+                return
+            self._active = None
+            if self._next_index < len(self._order) and self._order[self._next_index] == account_name:
+                self._next_index += 1
+            self._condition.notify_all()
+
+
 class ReplyStaggerCoordinator:
     """Atur jeda antar akun saat follow + absen ke penonton yang sama."""
 
@@ -425,6 +461,7 @@ class AccountBot:
         comment_feed: SharedCommentFeed | None = None,
         reply_stagger: ReplyStaggerCoordinator | None = None,
         fleet_registry: FleetRegistry | None = None,
+        boost_coordinator: BoostJoinCoordinator | None = None,
         *,
         proxy_pool: list[str] | None = None,
         account_index: int = 0,
@@ -433,6 +470,7 @@ class AccountBot:
         self.name = account["name"]
         self.comment_feed = comment_feed
         self.fleet_registry = fleet_registry
+        self.boost_coordinator = boost_coordinator
         self.proxy_pool = proxy_pool or []
         self._proxy_pool_start = account_index
         self._proxy_tried: set[str] = set()
@@ -451,6 +489,7 @@ class AccountBot:
         self.watch_before_comment = float(account.get("watch_before_comment_seconds") or 0)
         self.boost_own_live_viewers = bool(account.get("boost_own_live_viewers", True))
         self.boost_viewer_use_proxy = bool(account.get("boost_viewer_use_proxy", False))
+        self.boost_viewer_sequential = bool(account.get("boost_viewer_sequential", True))
         self.verbose = bool(account["verbose_polling"])
         self.cookies_file = account["cookies_file"]
         self.use_saved_session = bool(account["use_saved_session"])
@@ -576,6 +615,8 @@ class AccountBot:
                 self._log(logging.INFO, "Auto-follow anchor: aktif")
             if self.boost_own_live_viewers:
                 self._log(logging.INFO, "Boost penonton live sendiri: aktif")
+                if self.boost_coordinator and self.boost_viewer_sequential:
+                    self._log(logging.INFO, "Boost viewer antrian: 1 akun join OK lalu berikutnya")
                 if self.boost_viewer_use_proxy:
                     self._log(logging.INFO, "Boost viewer via proxy: aktif (experimental)")
                 else:
@@ -613,6 +654,8 @@ class AccountBot:
             )
         if self.boost_own_live_viewers:
             self._log(logging.INFO, "Boost penonton live sendiri: aktif")
+            if self.boost_coordinator and self.boost_viewer_sequential:
+                self._log(logging.INFO, "Boost viewer antrian: 1 akun join OK lalu berikutnya")
             if self.boost_viewer_use_proxy:
                 self._log(logging.INFO, "Boost viewer via proxy: aktif (experimental)")
             else:
@@ -790,23 +833,35 @@ class AccountBot:
             if stagger:
                 stagger.release_turn(commenter_id, self.name)
 
-    def _start_own_live_viewer(self) -> None:
+    def _start_own_live_viewer(self, stop_event: threading.Event) -> None:
         if not self.boost_own_live_viewers:
             return
-        match = re.search(r"(\d+)\s*$", self.name)
-        if match:
-            time.sleep(min(int(match.group(1)) * 3, 45))
+        use_queue = (
+            self.boost_coordinator is not None
+            and self.boost_viewer_sequential
+        )
+        if use_queue:
+            self._log(logging.INFO, "Menunggu giliran boost viewer (antrian)...")
+            if not self.boost_coordinator.wait_turn(self.name, stop_event):
+                return
+            self._log(logging.INFO, "Giliran boost viewer — mulai browser")
+        elif not use_queue:
+            match = re.search(r"(\d+)\s*$", self.name)
+            if match:
+                time.sleep(min(int(match.group(1)) * 3, 45))
         proc = self.client.start_own_live_viewer(
             self.anchor_id,
             use_proxy=self.boost_viewer_use_proxy,
         )
         if proc is None:
             self._log(logging.WARNING, "Gagal jalankan browser viewer live sendiri")
+            if use_queue and self.boost_coordinator:
+                self.boost_coordinator.finish_turn(self.name, joined=False)
             return
         self._own_live_viewer = proc
         threading.Thread(
             target=self._monitor_own_live_viewer,
-            args=(proc,),
+            args=(proc, stop_event, use_queue),
             daemon=True,
         ).start()
         via = "proxy" if self.boost_viewer_use_proxy and self.client.proxy else "VPS langsung"
@@ -817,7 +872,12 @@ class AccountBot:
             self.anchor_id,
         )
 
-    def _monitor_own_live_viewer(self, proc: subprocess.Popen) -> None:
+    def _monitor_own_live_viewer(
+        self,
+        proc: subprocess.Popen,
+        stop_event: threading.Event,
+        use_queue: bool,
+    ) -> None:
         joined = False
         try:
             if proc.stdout:
@@ -833,6 +893,8 @@ class AccountBot:
                 logging.INFO,
                 "Viewer live sendiri terdaftar (live/join OK)",
             )
+            if use_queue and self.boost_coordinator:
+                self.boost_coordinator.finish_turn(self.name, joined=True)
             return
 
         self._log(
@@ -848,31 +910,40 @@ class AccountBot:
             except Exception:
                 pass
         self._own_live_viewer = None
-        time.sleep(15)
+        if stop_event.wait(15):
+            if use_queue and self.boost_coordinator:
+                self.boost_coordinator.finish_turn(self.name, joined=False)
+            return
         retry = self.client.start_own_live_viewer(
             self.anchor_id,
             use_proxy=self.boost_viewer_use_proxy,
         )
         if retry is None:
+            if use_queue and self.boost_coordinator:
+                self.boost_coordinator.finish_turn(self.name, joined=False)
             return
         self._own_live_viewer = retry
+        retry_joined = False
         try:
             if retry.stdout:
                 line = retry.stdout.readline()
                 if line.strip():
                     data = json.loads(line.strip())
-                    if data.get("joined"):
+                    retry_joined = bool(data.get("joined"))
+                    if retry_joined:
                         self._log(
                             logging.INFO,
                             "Viewer live sendiri terdaftar (live/join OK, retry)",
                         )
-                        return
         except (json.JSONDecodeError, ValueError, OSError):
             pass
-        self._log(
-            logging.WARNING,
-            "Boost live sendiri retry — live/join masih belum OK",
-        )
+        if not retry_joined:
+            self._log(
+                logging.WARNING,
+                "Boost live sendiri retry — live/join masih belum OK",
+            )
+        if use_queue and self.boost_coordinator:
+            self.boost_coordinator.finish_turn(self.name, joined=retry_joined)
 
     def _follow_anchor_if_enabled(self, stop_event: threading.Event) -> None:
         if not self.auto_follow_anchor:
@@ -926,7 +997,7 @@ class AccountBot:
             return
         self._follow_anchor_if_enabled(stop_event)
         self.log_startup()
-        self._start_own_live_viewer()
+        self._start_own_live_viewer(stop_event)
 
         try:
             if not self.auto_reply:
@@ -1168,6 +1239,20 @@ def run_bot(config_path: str = "config.json") -> int:
     elif not reply_enabled:
         log.info("Auto-reply komentar: nonaktif (mode boost viewer live sendiri saja)")
 
+    boost_names = [
+        acc["name"]
+        for acc in accounts
+        if acc.get("boost_own_live_viewers", True)
+        and acc.get("boost_viewer_sequential", True)
+    ]
+    boost_coordinator: BoostJoinCoordinator | None = None
+    if len(boost_names) > 1:
+        boost_coordinator = BoostJoinCoordinator(boost_names)
+        log.info(
+            "Boost viewer antrian: %d akun — join 1 per 1 (live/join OK lalu lanjut)",
+            len(boost_names),
+        )
+
     if stagger.enabled:
         log.info(
             "Jeda antar akun (follow + absen): %.0f-%.0fs (acak)",
@@ -1198,6 +1283,7 @@ def run_bot(config_path: str = "config.json") -> int:
             comment_feed=comment_feed if account.get("auto_reply_on_comment", True) else None,
             reply_stagger=stagger if account.get("auto_reply_on_comment", True) else None,
             fleet_registry=fleet_registry,
+            boost_coordinator=boost_coordinator,
             proxy_pool=proxy_pool,
             account_index=index,
         )
