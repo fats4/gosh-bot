@@ -13,6 +13,7 @@ from typing import Any
 
 from bot import load_config, resolve_accounts, run_bot
 from setup_config import (
+    cmd_colors,
     cmd_proxy_from_file,
     cmd_proxy_test,
     cmd_quick_setup,
@@ -33,8 +34,80 @@ BOT_PATTERNS = (
     f"{ROOT}/gosh.py run",
 )
 
+ANCHOR_PRESETS: tuple[tuple[str, str], ...] = (
+    ("15887479", "Gameshunter / Faats_KNJ05"),
+    ("16436304", "Zeel_JJ05"),
+    ("16358724", "Sirenia_JJ05"),
+    ("16358511", "Moree_JJ05"),
+    ("16349669", "Yonjix_JJ05"),
+    ("16020021", "Jayden_KNJ05"),
+    ("16453888", "Fumgump_KNJ05"),
+    ("16555919", "jacobbb_KNJ05"),
+    ("16616188", "F0lkzz_KNJ05"),
+)
+
+ANCHOR_IDS = tuple(anchor_id for anchor_id, _ in ANCHOR_PRESETS)
+
+
+def apply_anchor_id(config_path: str, anchor_id: str) -> None:
+    """Set anchor_id yang sama untuk semua akun di config."""
+    path = Path(config_path)
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    for acc in cfg.get("accounts") or []:
+        acc["anchor_id"] = anchor_id
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Anchor ID → {anchor_id} (https://gosh.com/{anchor_id})")
+
+
+def _current_anchor_id(config_path: str) -> str:
+    try:
+        accounts = resolve_accounts(load_config(config_path))
+        return str(accounts[0]["anchor_id"]) if accounts else ""
+    except (ValueError, json.JSONDecodeError, FileNotFoundError):
+        return ""
+
+
+def prompt_anchor_id(config_path: str) -> str | None:
+    """Menu pilih anchor sebelum jalankan bot. Return None = pakai config saat ini."""
+    current = _current_anchor_id(config_path)
+    print("\nPilih Anchor ID:")
+    for index, (anchor_id, label) in enumerate(ANCHOR_PRESETS, start=1):
+        mark = " ← config saat ini" if anchor_id == current else ""
+        print(f"  {index}. {anchor_id} — {label}{mark}")
+        print(f"      https://gosh.com/{anchor_id}")
+    if current and current not in ANCHOR_IDS:
+        print(f"  0. Pakai config saat ini ({current})")
+    else:
+        print(f"  0. Pakai config saat ini ({current or '-'})")
+    while True:
+        max_choice = len(ANCHOR_PRESETS)
+        choice = input(f"\nPilih [1-{max_choice} / 0]: ").strip()
+        if choice == "0":
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= max_choice:
+            return ANCHOR_PRESETS[int(choice) - 1][0]
+        if choice in ANCHOR_IDS:
+            return choice
+        print(f"Pilihan tidak valid. Masukkan 1-{max_choice}, 0, atau ID anchor.")
+
+
+def prepare_run_anchor(args: argparse.Namespace) -> None:
+    """Terapkan anchor dari flag CLI atau prompt interaktif."""
+    if getattr(args, "use_config_anchor", False) or getattr(args, "foreground", False):
+        return
+    anchor_id = getattr(args, "anchor", None)
+    if anchor_id:
+        apply_anchor_id(args.config, anchor_id)
+        return
+    if sys.stdin.isatty():
+        picked = prompt_anchor_id(args.config)
+        if picked:
+            apply_anchor_id(args.config, picked)
+
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if not args.foreground:
+        prepare_run_anchor(args)
     if args.daemon and not args.foreground:
         log_path = Path(args.log)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,6 +118,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "-c",
             args.config,
             "--foreground",
+            "--use-config-anchor",
         ]
         with log_path.open("a", encoding="utf-8") as log_file:
             proc = subprocess.Popen(
@@ -143,6 +217,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             print("Validasi: OK")
         with_proxy = sum(1 for acc in cfg.get("accounts") or [] if acc.get("proxy"))
+        if accounts:
+            anchor_id = accounts[0]["anchor_id"]
+            print(f"Anchor  : {anchor_id} (https://gosh.com/{anchor_id})")
         if with_proxy:
             print(f"Proxy: {with_proxy}/{len(accounts)} akun")
     except (ValueError, json.JSONDecodeError) as exc:
@@ -195,7 +272,9 @@ def make_args(config: str = "config.json", **kwargs) -> argparse.Namespace:
         "allow_partial": False,
         "name": None,
         "email": None,
+        "anchor": None,
         "anchor_id": None,
+        "use_config_anchor": False,
         "proxy": None,
     }
     defaults.update(kwargs)
@@ -225,6 +304,7 @@ def _run_config_submenu(config: str) -> None:
         print("  3. Sync proxy dari file txt")
         print("  4. Cek status config")
         print("  5. Lihat config")
+        print("  6. Warna chat akun")
         print("  0. Kembali")
         choice = input("\nPilih: ").strip()
         if choice == "0":
@@ -239,6 +319,8 @@ def _run_config_submenu(config: str) -> None:
             cmd_validate(make_args(config))
         elif choice == "5":
             cmd_show(make_args(config))
+        elif choice == "6":
+            cmd_colors(make_args(config))
         else:
             print("Pilihan tidak valid.")
             continue
@@ -263,6 +345,9 @@ def interactive_menu(config: str = "config.json") -> int:
             print("Sampai jumpa.")
             return 0
         if choice == "1":
+            picked = prompt_anchor_id(config)
+            if picked:
+                apply_anchor_id(config, picked)
             print("\nBot berjalan. Tekan Ctrl+C untuk stop.\n")
             try:
                 run_bot(config)
@@ -270,7 +355,18 @@ def interactive_menu(config: str = "config.json") -> int:
                 print("\nBot dihentikan.")
             _pause()
         elif choice == "2":
-            cmd_run(make_args(config, daemon=True, foreground=False, log="bot.log"))
+            picked = prompt_anchor_id(config)
+            if picked:
+                apply_anchor_id(config, picked)
+            cmd_run(
+                make_args(
+                    config,
+                    daemon=True,
+                    foreground=False,
+                    log="bot.log",
+                    use_config_anchor=True,
+                )
+            )
             _pause()
         elif choice == "3":
             cmd_stop(make_args(config))
@@ -309,8 +405,10 @@ Contoh cepat:
   python3 gosh.py config validate     # cek config
   python3 gosh.py login test          # tes login semua akun
   python3 gosh.py config proxy test   # tes proxy
-  python3 gosh.py run                 # jalankan bot (foreground)
-  python3 gosh.py run -d              # jalankan di background
+  python3 gosh.py run                 # jalankan bot (pilih anchor interaktif)
+  python3 gosh.py run -d              # background (pilih anchor interaktif)
+  python3 gosh.py run -a 16436304     # langsung pakai anchor tertentu
+  python3 gosh.py run -d --use-config-anchor  # tanpa prompt, pakai config
   python3 gosh.py status              # cek status
   python3 gosh.py stop                # hentikan bot
         """,
@@ -340,6 +438,21 @@ Contoh cepat:
         "--log",
         default="bot.log",
         help="File log saat --daemon (default: bot.log)",
+    )
+    p_run.add_argument(
+        "-a",
+        "--anchor",
+        choices=ANCHOR_IDS,
+        metavar="ID",
+        help=(
+            "Anchor ID target live "
+            f"({', '.join(ANCHOR_IDS)})"
+        ),
+    )
+    p_run.add_argument(
+        "--use-config-anchor",
+        action="store_true",
+        help="Pakai anchor_id dari config.json tanpa prompt",
     )
     p_run.set_defaults(func=cmd_run)
 

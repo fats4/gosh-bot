@@ -16,6 +16,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from gosh_client import GoshApiError, GoshClient, RATE_LIMIT_CODE
 
 logging.basicConfig(
@@ -38,6 +40,9 @@ DEFAULT_REPLY_TEMPLATES = (
     "hadir bang, {from_name} absen",
 )
 
+# Warna nickname chat — palet & helper ada di setup_config.py
+from setup_config import DEFAULT_CHAT_NAME_COLORS
+
 ACCOUNT_KEYS = (
     "name",
     "anchor_id",
@@ -49,9 +54,13 @@ ACCOUNT_KEYS = (
     "cooldown_per_user_seconds",
     "skip_bot_accounts",
     "skip_fleet_accounts",
+    "skip_anchor_comments",
     "auto_follow_on_comment",
+    "auto_follow_anchor",
+    "auto_reply_on_comment",
     "watch_before_comment_seconds",
     "boost_own_live_viewers",
+    "boost_viewer_use_proxy",
     "reply_stagger_min_seconds",
     "reply_stagger_max_seconds",
     "rate_limit_retry_min_seconds",
@@ -63,6 +72,7 @@ ACCOUNT_KEYS = (
     "proxy",
     "login",
     "cookies_file",
+    "chat_name_color",
 )
 
 
@@ -108,9 +118,13 @@ def _merge_account(global_cfg: dict, account_cfg: dict, index: int) -> dict:
     merged.setdefault("cooldown_per_user_seconds", 0)
     merged.setdefault("skip_bot_accounts", False)
     merged.setdefault("skip_fleet_accounts", True)
+    merged.setdefault("skip_anchor_comments", True)
     merged.setdefault("auto_follow_on_comment", True)
+    merged.setdefault("auto_follow_anchor", False)
+    merged.setdefault("auto_reply_on_comment", True)
     merged.setdefault("watch_before_comment_seconds", 15)
     merged.setdefault("boost_own_live_viewers", True)
+    merged.setdefault("boost_viewer_use_proxy", False)
     merged.setdefault("reply_stagger_min_seconds", 5)
     merged.setdefault("reply_stagger_max_seconds", 15)
     merged.setdefault("rate_limit_retry_min_seconds", 15)
@@ -119,6 +133,11 @@ def _merge_account(global_cfg: dict, account_cfg: dict, index: int) -> dict:
     merged.setdefault("verbose_polling", False)
     merged.setdefault("use_saved_session", False)
     merged.setdefault("cookies_file", f"cookies_{name}.json")
+
+    color = str(merged.get("chat_name_color") or "").strip()
+    if not color:
+        color = DEFAULT_CHAT_NAME_COLORS[index % len(DEFAULT_CHAT_NAME_COLORS)]
+    merged["chat_name_color"] = color
 
     sm_box_id = str(merged.get("sm_box_id") or "").strip()
     if not sm_box_id:
@@ -231,6 +250,39 @@ def parse_chat_message(raw_msg: dict) -> dict | None:
         "live_id": str(inner.get("live_id") or ""),
         "is_emoji": bool(re.search(r"\[emoji:\d+\]", text)),
     }
+
+
+def _proxy_host(proxy: str) -> str:
+    return proxy.split("@")[-1].split("://")[-1]
+
+
+def rotate_client_proxy(
+    client: GoshClient,
+    account: dict,
+    proxy_pool: list[str],
+    account_index: int,
+    tried: set[str],
+    reason: str,
+    *,
+    log_prefix: str = "",
+) -> bool:
+    if not proxy_pool:
+        return False
+    for offset in range(1, len(proxy_pool)):
+        idx = (account_index + offset) % len(proxy_pool)
+        candidate = proxy_pool[idx]
+        if candidate in tried:
+            continue
+        tried.add(candidate)
+        host = _proxy_host(candidate)
+        if log_prefix:
+            log.warning("[%s] %s — ganti proxy ke %s", log_prefix, reason, host)
+        else:
+            log.warning("%s — ganti proxy ke %s", reason, host)
+        client.set_proxy(candidate)
+        account["proxy"] = candidate
+        return True
+    return False
 
 
 class FleetRegistry:
@@ -373,11 +425,17 @@ class AccountBot:
         comment_feed: SharedCommentFeed | None = None,
         reply_stagger: ReplyStaggerCoordinator | None = None,
         fleet_registry: FleetRegistry | None = None,
+        *,
+        proxy_pool: list[str] | None = None,
+        account_index: int = 0,
     ) -> None:
         self.account = account
         self.name = account["name"]
         self.comment_feed = comment_feed
         self.fleet_registry = fleet_registry
+        self.proxy_pool = proxy_pool or []
+        self._proxy_pool_start = account_index
+        self._proxy_tried: set[str] = set()
         self.anchor_id = account["anchor_id"]
         self.reply_from_name = str(account.get("reply_from_name") or "Faats [KNJ 05]")
         self.randomize_reply = bool(account.get("randomize_reply", True))
@@ -385,9 +443,14 @@ class AccountBot:
         self.cooldown = float(account["cooldown_per_user_seconds"])
         self.skip_bots = bool(account["skip_bot_accounts"])
         self.skip_fleet = bool(account.get("skip_fleet_accounts", True))
+        self.skip_anchor = bool(account.get("skip_anchor_comments", True))
         self.auto_follow = bool(account["auto_follow_on_comment"])
+        self.auto_follow_anchor = bool(account.get("auto_follow_anchor", False))
+        self.auto_reply = bool(account.get("auto_reply_on_comment", True))
+        self._account_index = account_index
         self.watch_before_comment = float(account.get("watch_before_comment_seconds") or 0)
         self.boost_own_live_viewers = bool(account.get("boost_own_live_viewers", True))
+        self.boost_viewer_use_proxy = bool(account.get("boost_viewer_use_proxy", False))
         self.verbose = bool(account["verbose_polling"])
         self.cookies_file = account["cookies_file"]
         self.use_saved_session = bool(account["use_saved_session"])
@@ -402,13 +465,27 @@ class AccountBot:
             cookies_file=self.cookies_file if self.use_saved_session else None,
             load_cookies=self.use_saved_session,
             proxy=account.get("proxy"),
+            chat_name_color=str(account.get("chat_name_color") or "").strip() or None,
         )
+        if self.client.proxy:
+            self._proxy_tried.add(self.client.proxy)
         self.last_reply_at: dict[str, float] = {}
         self.followed_users: set[str] = set()
         self._own_live_viewer: subprocess.Popen | None = None
 
     def _log(self, level: int, msg: str, *args: Any) -> None:
         log.log(level, f"[{self.name}] {msg}", *args)
+
+    def _rotate_proxy(self, reason: str) -> bool:
+        return rotate_client_proxy(
+            self.client,
+            self.account,
+            self.proxy_pool,
+            self._proxy_pool_start,
+            self._proxy_tried,
+            reason,
+            log_prefix=self.name,
+        )
 
     def _with_rate_limit_retry(
         self,
@@ -418,9 +495,17 @@ class AccountBot:
         *,
         max_retries: int = 2,
     ):
+        proxy_rotations = 0
+        max_proxy_rotations = min(len(self.proxy_pool), 10) if self.proxy_pool else 0
         for attempt in range(max_retries + 1):
             try:
                 return func()
+            except requests.exceptions.ProxyError as exc:
+                if proxy_rotations >= max_proxy_rotations or not self._rotate_proxy(action):
+                    raise
+                proxy_rotations += 1
+                self._log(logging.WARNING, "%s: retry setelah proxy error", action)
+                continue
             except GoshApiError as exc:
                 if exc.code != RATE_LIMIT_CODE or attempt >= max_retries:
                     raise
@@ -451,7 +536,16 @@ class AccountBot:
             return
 
         self._log(logging.INFO, "Login dengan email %s ...", email)
-        self.client.login(email, password, sm_box_id=sm_box_id)
+        proxy_rotations = 0
+        max_proxy_rotations = min(len(self.proxy_pool), 10) if self.proxy_pool else 0
+        while True:
+            try:
+                self.client.login(email, password, sm_box_id=sm_box_id)
+                break
+            except requests.exceptions.ProxyError:
+                if proxy_rotations >= max_proxy_rotations or not self._rotate_proxy("login"):
+                    raise
+                proxy_rotations += 1
         self.client.save_cookies(self.cookies_file)
         if self.fleet_registry and self.client.uid:
             self.fleet_registry.register(self.client.uid)
@@ -470,10 +564,25 @@ class AccountBot:
         return self.client.get_commenter_room(commenter_id)
 
     def log_startup(self) -> None:
-        self._log(logging.INFO, "Memantau komentar https://gosh.com/%s", self.anchor_id)
         if self.client.proxy:
             proxy_host = self.client.proxy.split("@")[-1].split("://")[-1]
             self._log(logging.INFO, "Proxy: %s", proxy_host)
+        if not self.auto_reply:
+            self._log(
+                logging.INFO,
+                "Mode boost viewer live sendiri (auto-reply komentar nonaktif)",
+            )
+            if self.auto_follow_anchor:
+                self._log(logging.INFO, "Auto-follow anchor: aktif")
+            if self.boost_own_live_viewers:
+                self._log(logging.INFO, "Boost penonton live sendiri: aktif")
+                if self.boost_viewer_use_proxy:
+                    self._log(logging.INFO, "Boost viewer via proxy: aktif (experimental)")
+                else:
+                    self._log(logging.INFO, "Boost viewer via proxy: nonaktif (VPS langsung)")
+            return
+
+        self._log(logging.INFO, "Memantau komentar https://gosh.com/%s", self.anchor_id)
         if self.randomize_reply:
             templates = _reply_templates(self.account)
             self._log(
@@ -492,6 +601,10 @@ class AccountBot:
             self._log(logging.INFO, "Auto-follow penonton yang komen: aktif")
         else:
             self._log(logging.INFO, "Auto-follow penonton yang komen: nonaktif")
+        if self.auto_follow_anchor:
+            self._log(logging.INFO, "Auto-follow anchor (%s): aktif", self.anchor_id)
+        else:
+            self._log(logging.INFO, "Auto-follow anchor: nonaktif")
         if self.watch_before_comment > 0:
             self._log(
                 logging.INFO,
@@ -500,6 +613,10 @@ class AccountBot:
             )
         if self.boost_own_live_viewers:
             self._log(logging.INFO, "Boost penonton live sendiri: aktif")
+            if self.boost_viewer_use_proxy:
+                self._log(logging.INFO, "Boost viewer via proxy: aktif (experimental)")
+            else:
+                self._log(logging.INFO, "Boost viewer via proxy: nonaktif (VPS langsung)")
         if self.cooldown > 0:
             self._log(logging.INFO, "Cooldown per user: %ss", int(self.cooldown))
         else:
@@ -528,13 +645,12 @@ class AccountBot:
                     parsed.get("_sequence"),
                 )
             return
-        if commenter_id == self.anchor_id:
-            if self.verbose:
-                self._log(
-                    logging.INFO,
-                    "Lewati komen anchor/live sendiri seq=%s",
-                    parsed.get("_sequence"),
-                )
+        if self.skip_anchor and commenter_id == self.anchor_id:
+            self._log(
+                logging.INFO,
+                "Lewati komen dari akun live/anchor sendiri (%s) — tes pakai akun lain",
+                parsed.get("nickname") or commenter_id,
+            )
             return
         if (
             self.skip_fleet
@@ -679,17 +795,111 @@ class AccountBot:
             return
         match = re.search(r"(\d+)\s*$", self.name)
         if match:
-            time.sleep(int(match.group(1)) * 3)
-        proc = self.client.start_own_live_viewer(self.anchor_id)
+            time.sleep(min(int(match.group(1)) * 3, 45))
+        proc = self.client.start_own_live_viewer(
+            self.anchor_id,
+            use_proxy=self.boost_viewer_use_proxy,
+        )
         if proc is None:
             self._log(logging.WARNING, "Gagal jalankan browser viewer live sendiri")
             return
         self._own_live_viewer = proc
+        threading.Thread(
+            target=self._monitor_own_live_viewer,
+            args=(proc,),
+            daemon=True,
+        ).start()
+        via = "proxy" if self.boost_viewer_use_proxy and self.client.proxy else "VPS langsung"
         self._log(
             logging.INFO,
-            "Browser viewer live sendiri aktif (https://gosh.com/%s)",
+            "Browser boost live sendiri dimulai (%s) → https://gosh.com/%s",
+            via,
             self.anchor_id,
         )
+
+    def _monitor_own_live_viewer(self, proc: subprocess.Popen) -> None:
+        joined = False
+        try:
+            if proc.stdout:
+                line = proc.stdout.readline()
+                if line.strip():
+                    data = json.loads(line.strip())
+                    joined = bool(data.get("joined"))
+        except (json.JSONDecodeError, ValueError, OSError):
+            pass
+
+        if joined:
+            self._log(
+                logging.INFO,
+                "Viewer live sendiri terdaftar (live/join OK)",
+            )
+            return
+
+        self._log(
+            logging.WARNING,
+            "Browser boost jalan tapi live/join belum terkonfirmasi — coba lagi...",
+        )
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        self._own_live_viewer = None
+        time.sleep(15)
+        retry = self.client.start_own_live_viewer(
+            self.anchor_id,
+            use_proxy=self.boost_viewer_use_proxy,
+        )
+        if retry is None:
+            return
+        self._own_live_viewer = retry
+        try:
+            if retry.stdout:
+                line = retry.stdout.readline()
+                if line.strip():
+                    data = json.loads(line.strip())
+                    if data.get("joined"):
+                        self._log(
+                            logging.INFO,
+                            "Viewer live sendiri terdaftar (live/join OK, retry)",
+                        )
+                        return
+        except (json.JSONDecodeError, ValueError, OSError):
+            pass
+        self._log(
+            logging.WARNING,
+            "Boost live sendiri retry — live/join masih belum OK",
+        )
+
+    def _follow_anchor_if_enabled(self, stop_event: threading.Event) -> None:
+        if not self.auto_follow_anchor:
+            return
+        anchor_id = str(self.anchor_id)
+        if anchor_id in self.followed_users:
+            return
+        if str(self.client.uid) == anchor_id:
+            self._log(logging.INFO, "Lewati follow anchor — akun ini adalah anchor")
+            return
+
+        stagger_secs = self._account_index * random.uniform(0.3, 0.8)
+        if stagger_secs > 0 and stop_event.wait(stagger_secs):
+            return
+
+        try:
+            self._with_rate_limit_retry(
+                "Follow anchor",
+                lambda: self.client.follow_user(anchor_id),
+                stop_event,
+            )
+            self.followed_users.add(anchor_id)
+            self._log(logging.INFO, "Berhasil follow anchor (%s)", anchor_id)
+        except GoshApiError as exc:
+            self._log(logging.WARNING, "Gagal follow anchor %s: %s", anchor_id, exc)
+        except Exception as exc:
+            self._log(logging.WARNING, "Gagal follow anchor %s: %s", anchor_id, exc)
 
     def _stop_own_live_viewer(self) -> None:
         proc = self._own_live_viewer
@@ -706,11 +916,24 @@ class AccountBot:
                 pass
 
     def run(self, stop_event: threading.Event) -> None:
-        self.ensure_login()
+        try:
+            self.ensure_login()
+        except requests.exceptions.ProxyError:
+            self._log(logging.ERROR, "Login gagal — semua proxy di pool tidak merespons")
+            return
+        except Exception as exc:
+            self._log(logging.ERROR, "Login gagal: %s", exc)
+            return
+        self._follow_anchor_if_enabled(stop_event)
         self.log_startup()
         self._start_own_live_viewer()
 
         try:
+            if not self.auto_reply:
+                while not stop_event.is_set():
+                    stop_event.wait(1)
+                return
+
             if self.comment_feed is not None:
                 while not stop_event.is_set():
                     try:
@@ -768,6 +991,9 @@ def run_comment_poller(
     account: dict,
     feed: SharedCommentFeed,
     stop_event: threading.Event,
+    *,
+    proxy_pool: list[str] | None = None,
+    account_index: int = 0,
 ) -> None:
     """Poll fetch_msg sekali, broadcast ke semua akun bot."""
     name = account["name"]
@@ -775,29 +1001,77 @@ def run_comment_poller(
     poll_interval = float(account.get("poll_interval_seconds") or 0)
     min_poll_interval = float(account.get("min_poll_interval_seconds") or 0)
     verbose = bool(account.get("verbose_polling"))
+    pool = proxy_pool or []
+    proxy_tried: set[str] = set()
+    max_proxy_rotations = min(len(pool), 10) if pool else 0
+    poller_tag = f"{name}-poller"
 
     client = GoshClient(
         cookies_file=account["cookies_file"] if account.get("use_saved_session") else None,
         load_cookies=bool(account.get("use_saved_session")),
         proxy=account.get("proxy"),
     )
+    if client.proxy:
+        proxy_tried.add(client.proxy)
+
     login_cfg = account["login"]
-    if not client.uid:
-        log.info("[%s-poller] Login untuk polling komentar...", name)
-        client.login(
-            login_cfg["email"],
-            login_cfg["password"],
-            sm_box_id=account["sm_box_id"],
+
+    def rotate_proxy(reason: str) -> bool:
+        return rotate_client_proxy(
+            client,
+            account,
+            pool,
+            account_index,
+            proxy_tried,
+            reason,
+            log_prefix=poller_tag,
         )
-        client.save_cookies(account["cookies_file"])
-    log.info("[%s-poller] Polling komentar https://gosh.com/%s (shared)", name, anchor_id)
+
+    while not stop_event.is_set() and not client.uid:
+        log.info("[%s] Login untuk polling komentar...", poller_tag)
+        proxy_rotations = 0
+        logged_in = False
+        while not stop_event.is_set():
+            try:
+                client.login(
+                    login_cfg["email"],
+                    login_cfg["password"],
+                    sm_box_id=account["sm_box_id"],
+                )
+                logged_in = True
+                break
+            except requests.exceptions.ProxyError:
+                if proxy_rotations >= max_proxy_rotations or not rotate_proxy("login"):
+                    log.error(
+                        "[%s] Login gagal (proxy timeout), tunggu 30s lalu coba lagi...",
+                        poller_tag,
+                    )
+                    break
+                proxy_rotations += 1
+            except Exception as exc:
+                log.error("[%s] Login gagal: %s", poller_tag, exc)
+                stop_event.wait(30)
+                break
+        if logged_in:
+            client.save_cookies(account["cookies_file"])
+            break
+        stop_event.wait(30)
+        proxy_tried.clear()
+        if client.proxy:
+            proxy_tried.add(client.proxy)
+
+    if not client.uid:
+        log.error("[%s] Tidak bisa login — polling komentar nonaktif.", poller_tag)
+        return
+
+    log.info("[%s] Polling komentar https://gosh.com/%s (shared)", poller_tag, anchor_id)
 
     while not stop_event.is_set():
         try:
             data = client.fetch_messages(anchor_id)
             msgs = data.get("msgs") or []
             if verbose and not msgs:
-                log.info("[%s-poller] Belum ada komen baru", name)
+                log.info("[%s] Belum ada komen baru", poller_tag)
 
             for raw_msg in msgs:
                 if stop_event.is_set():
@@ -807,8 +1081,8 @@ def run_comment_poller(
                     continue
                 if feed.push(parsed, raw_msg.get("sequence")) and verbose:
                     log.info(
-                        "[%s-poller] Komentar baru seq=%s dari %s",
-                        name,
+                        "[%s] Komentar baru seq=%s dari %s",
+                        poller_tag,
                         raw_msg.get("sequence"),
                         parsed["nickname"],
                     )
@@ -819,10 +1093,15 @@ def run_comment_poller(
             sleep_ms = max(wait_ms, poll_ms, floor_ms)
             if sleep_ms > 0 and not stop_event.is_set():
                 stop_event.wait(sleep_ms / 1000)
+        except requests.exceptions.ProxyError as exc:
+            if rotate_proxy("fetch_msg"):
+                continue
+            log.error("[%s] Proxy error: %s — tunggu 15s", poller_tag, exc)
+            stop_event.wait(15)
         except Exception as exc:
-            log.error("[%s-poller] Error: %s", name, exc)
-            if poll_interval > 0:
-                stop_event.wait(poll_interval)
+            log.error("[%s] Error: %s", poller_tag, exc)
+            wait = poll_interval if poll_interval > 0 else 5
+            stop_event.wait(wait)
 
 
 def run_bot(config_path: str = "config.json") -> int:
@@ -849,6 +1128,11 @@ def run_bot(config_path: str = "config.json") -> int:
         return 1
 
     log.info("Menjalankan %d akun bot", len(accounts))
+    color_summary = ", ".join(
+        f"{account['name']}={account.get('chat_name_color', '-')}"
+        for account in accounts
+    )
+    log.info("Warna nickname chat: %s", color_summary)
     account_names = [account["name"] for account in accounts]
     stagger = ReplyStaggerCoordinator(
         account_names,
@@ -860,15 +1144,29 @@ def run_bot(config_path: str = "config.json") -> int:
     for account in accounts:
         account.setdefault("min_poll_interval_seconds", min_poll)
 
-    use_shared_poller = len(accounts) > 1
+    reply_enabled = any(bool(acc.get("auto_reply_on_comment", True)) for acc in accounts)
+    use_shared_poller = len(accounts) > 1 and reply_enabled
     comment_feed: SharedCommentFeed | None = None
     fleet_registry = FleetRegistry()
-    if use_shared_poller:
+    proxy_pool: list[str] = []
+    if config.get("proxy_list_file"):
+        try:
+            from setup_config import load_proxy_pool
+
+            proxy_pool = load_proxy_pool(config)
+            if proxy_pool:
+                log.info("Proxy pool: %d proxy siap (rotasi otomatis jika timeout)", len(proxy_pool))
+        except (FileNotFoundError, ValueError) as exc:
+            log.warning("Proxy pool: %s", exc)
+
+    if reply_enabled and use_shared_poller:
         comment_feed = SharedCommentFeed(account_names)
         log.info(
             "Polling komentar terpusat (akun %s) — semua bot dapat komen yang sama",
             accounts[0]["name"],
         )
+    elif not reply_enabled:
+        log.info("Auto-reply komentar: nonaktif (mode boost viewer live sendiri saja)")
 
     if stagger.enabled:
         log.info(
@@ -887,18 +1185,21 @@ def run_bot(config_path: str = "config.json") -> int:
         poller_thread = threading.Thread(
             target=run_comment_poller,
             args=(accounts[0], comment_feed, stop_event),
+            kwargs={"proxy_pool": proxy_pool, "account_index": 0},
             name="gosh-bot-poller",
             daemon=True,
         )
         poller_thread.start()
         threads.append(poller_thread)
 
-    for account in accounts:
+    for index, account in enumerate(accounts):
         bot = AccountBot(
             account,
-            comment_feed=comment_feed,
-            reply_stagger=stagger,
+            comment_feed=comment_feed if account.get("auto_reply_on_comment", True) else None,
+            reply_stagger=stagger if account.get("auto_reply_on_comment", True) else None,
             fleet_registry=fleet_registry,
+            proxy_pool=proxy_pool,
+            account_index=index,
         )
         thread = threading.Thread(
             target=bot.run,

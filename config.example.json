@@ -13,9 +13,13 @@
   "cooldown_per_user_seconds": 0,
   "skip_bot_accounts": false,
   "skip_fleet_accounts": true,
+  "skip_anchor_comments": true,
   "auto_follow_on_comment": true,
+  "auto_follow_anchor": false,
+  "auto_reply_on_comment": true,
   "watch_before_comment_seconds": 15,
   "boost_own_live_viewers": true,
+  "boost_viewer_use_proxy": false,
   "reply_stagger_min_seconds": 5,
   "reply_stagger_max_seconds": 15,
   "rate_limit_retry_min_seconds": 15,
@@ -36,7 +40,8 @@
         "email": "akun1@gmail.com",
         "password": "password-akun1"
       },
-      "cookies_file": "cookies_bot1.json"
+      "cookies_file": "cookies_bot1.json",
+      "chat_name_color": "#FF6D1C"
     },
     {
       "name": "bot2",
@@ -46,7 +51,8 @@
         "email": "akun2@gmail.com",
         "password": "password-akun2"
       },
-      "cookies_file": "cookies_bot2.json"
+      "cookies_file": "cookies_bot2.json",
+      "chat_name_color": "#33DCFF"
     }
   ]
 }

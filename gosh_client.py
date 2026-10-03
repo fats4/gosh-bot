@@ -83,6 +83,7 @@ class GoshClient:
         *,
         load_cookies: bool = True,
         proxy: str | None = None,
+        chat_name_color: str | None = None,
     ) -> None:
         self.session = requests.Session()
         self.proxy = (proxy or "").strip() or None
@@ -107,9 +108,18 @@ class GoshClient:
         self.tim_user_sig: str | None = None
         self.can_chat: bool | None = None
         self.user_profile: dict[str, Any] | None = None
+        self.chat_name_color = (chat_name_color or "").strip() or None
 
         if load_cookies and cookies_file and Path(cookies_file).exists():
             self.load_cookies(cookies_file)
+
+    def set_proxy(self, proxy: str | None) -> None:
+        self.proxy = (proxy or "").strip() or None
+        if self.proxy:
+            proxy_url = self.proxy if "://" in self.proxy else f"http://{self.proxy}"
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+        else:
+            self.session.proxies.clear()
 
     @staticmethod
     def _generate_smid() -> str:
@@ -514,16 +524,20 @@ class GoshClient:
         anchor_id: str,
         seconds: float,
         stop_event: threading.Event | None = None,
+        *,
+        proxy: str | None = None,
     ) -> dict[str, Any] | None:
         if seconds <= 0 or not self.BROWSER_WATCH_SCRIPT.exists():
             return None
 
+        use_proxy = self.proxy if proxy is None else proxy
         payload = {
             "url": f"https://gosh.com/{anchor_id}",
             "watch_seconds": seconds,
             "cookies": self._cookies_for_browser(),
             "user_agent": self.session.headers.get("User-Agent"),
-            "proxy": self.proxy,
+            "proxy": use_proxy or None,
+            "goto_timeout": 60000,
         }
         timeout = max(int(seconds) + 90, 90)
         if stop_event and stop_event.wait(0):
@@ -557,15 +571,36 @@ class GoshClient:
                     continue
         return None
 
-    def start_own_live_viewer(self, anchor_id: str) -> subprocess.Popen | None:
+    def start_own_live_viewer(
+        self,
+        anchor_id: str,
+        *,
+        use_proxy: bool = False,
+    ) -> subprocess.Popen | None:
         """Jalankan browser headless persisten di live sendiri (boost penonton)."""
         if not self.BROWSER_WATCH_KEEP_SCRIPT.exists():
             return None
+        boost_proxy = self.proxy if use_proxy else None
+        if use_proxy:
+            if self.proxy:
+                proxy_host = self.proxy.split("@")[-1].split("://")[-1]
+                log.info(
+                    "Browser boost uid=%s live=%s via proxy %s",
+                    self.uid,
+                    anchor_id,
+                    proxy_host,
+                )
+            else:
+                log.warning(
+                    "boost_viewer_use_proxy aktif tapi akun uid=%s tidak punya proxy — VPS langsung",
+                    self.uid,
+                )
         payload = {
             "url": f"https://gosh.com/{anchor_id}",
             "cookies": self._cookies_for_browser(),
             "user_agent": self.session.headers.get("User-Agent"),
-            "proxy": self.proxy,
+            "proxy": boost_proxy,
+            "goto_timeout": 90000 if boost_proxy else 60000,
         }
         try:
             proc = subprocess.Popen(
@@ -706,6 +741,19 @@ class GoshClient:
                 pass
             time.sleep(5)
 
+    @staticmethod
+    def _browser_join_ok(result: dict[str, Any] | None) -> bool:
+        if not result:
+            return False
+        if result.get("joined"):
+            return True
+        joins = result.get("join_results") or []
+        return any(
+            "/live/join" in str(item.get("url") or "")
+            and int(item.get("status") or 0) in (200, 204)
+            for item in joins
+        )
+
     def watch_live(
         self,
         room: dict[str, Any],
@@ -716,28 +764,52 @@ class GoshClient:
         seconds: float,
         stop_event: threading.Event | None = None,
     ) -> None:
-        """Nonton live via browser headless (live/join resmi) sebelum absen."""
+        """Nonton live via browser (live/join) agar penonton terdaftar sebelum absen."""
         if seconds <= 0:
             return
 
-        result = self._watch_via_browser(anchor_id, seconds, stop_event)
-        if result:
-            joins = result.get("join_results") or []
-            ok_joins = [item for item in joins if item.get("status") == 200]
-            if ok_joins:
-                log.info(
-                    "Browser watch uid=%s live=%s join OK (%ss)",
-                    self.uid,
-                    anchor_id,
-                    int(seconds),
-                )
-                return
+        # live/join hanya terpicu dari browser asli; proxy HTTP sering gagal load gosh.com.
+        # API/absen tetap lewat proxy akun, browser watch pakai koneksi langsung VPS.
+        if self.proxy:
+            log.info(
+                "Browser watch uid=%s live=%s via koneksi langsung (live/join butuh browser)",
+                self.uid,
+                anchor_id,
+            )
+        result = self._watch_via_browser(
+            anchor_id,
+            seconds,
+            stop_event,
+            proxy=None,
+        )
+        if self._browser_join_ok(result):
+            log.info(
+                "Viewer terdaftar uid=%s live=%s (%ss)",
+                self.uid,
+                anchor_id,
+                int(seconds),
+            )
+            return
+
+        if result and result.get("ok"):
+            log.warning(
+                "Browser uid=%s live=%s selesai tanpa live/join — penonton mungkin tidak naik",
+                self.uid,
+                anchor_id,
+            )
+        else:
+            log.warning(
+                "Browser uid=%s live=%s gagal — penonton mungkin tidak naik",
+                self.uid,
+                anchor_id,
+            )
 
         log.warning(
-            "Browser watch uid=%s live=%s fallback HLS/TIM",
+            "Viewer belum terdaftar uid=%s live=%s. Absen tetap jalan.",
             self.uid,
             anchor_id,
         )
+        # Fallback lama: HLS/TIM tidak menambah viewer count, hanya delay sebelum absen.
         workers: list[threading.Thread] = []
 
         hls_url = room.get("hls_addr") or room.get("flv_addr")
@@ -759,6 +831,11 @@ class GoshClient:
                 )
             )
 
+        if not workers:
+            if stop_event:
+                stop_event.wait(seconds)
+            return
+
         for worker in workers:
             worker.start()
         for worker in workers:
@@ -776,6 +853,9 @@ class GoshClient:
             raise RuntimeError("tim_user_sig tidak ada. Login ulang.")
         if not self.user_profile:
             self.refresh_user_profile()
+        user = dict(self.user_profile or {})
+        if self.chat_name_color:
+            user["name_color"] = self.chat_name_color
         if not self.TIM_SEND_SCRIPT.exists():
             raise RuntimeError(
                 f"Script TIM tidak ditemukan: {self.TIM_SEND_SCRIPT}. "
@@ -789,7 +869,7 @@ class GoshClient:
             "group_id": group_id,
             "live_id": live_id,
             "text": text,
-            "user": self.user_profile,
+            "user": user,
             "watch_seconds": watch_seconds,
         }
         timeout = max(int(watch_seconds) + 45, 45)

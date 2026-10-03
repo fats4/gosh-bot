@@ -34,8 +34,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "skip_bot_accounts": False,
     "skip_fleet_accounts": True,
     "auto_follow_on_comment": False,
+    "auto_follow_anchor": False,
+    "auto_reply_on_comment": True,
     "watch_before_comment_seconds": 15,
     "boost_own_live_viewers": True,
+    "boost_viewer_use_proxy": False,
     "reply_stagger_min_seconds": 5,
     "reply_stagger_max_seconds": 15,
     "rate_limit_retry_min_seconds": 15,
@@ -47,12 +50,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "accounts": [],
 }
 
+# Warna nickname chat di live (hex). Tiap akun dapat warna berbeda jika tidak di-set manual.
+DEFAULT_CHAT_NAME_COLORS = (
+    "#FF6D1C",
+    "#33DCFF",
+    "#B160EB",
+    "#49FD94",
+    "#FF3A8E",
+    "#F40B3F",
+    "#00CE94",
+    "#D91FFF",
+)
+
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
 GLOBAL_BOOL_KEYS = (
     "randomize_reply",
     "skip_bot_accounts",
     "skip_fleet_accounts",
     "auto_follow_on_comment",
+    "auto_follow_anchor",
+    "auto_reply_on_comment",
     "boost_own_live_viewers",
+    "boost_viewer_use_proxy",
     "verbose_polling",
     "use_saved_session",
 )
@@ -208,6 +228,17 @@ def sync_proxies_from_file(
     return assigned, total_unique
 
 
+def load_proxy_pool(cfg: dict[str, Any]) -> list[str]:
+    """Muat semua proxy unik dari file (pool untuk rotasi jika proxy mati)."""
+    path = Path(cfg.get("proxy_list_file") or "proxies.txt")
+    if not path.exists():
+        return []
+    user = str(cfg.get("proxy_username") or "")
+    password = str(cfg.get("proxy_password") or "")
+    lines = unique_proxy_lines(read_proxy_file(path))
+    return [normalize_proxy(line, user, password) for line in lines]
+
+
 def cmd_proxy_from_file(args: argparse.Namespace) -> int:
     path = Path(args.config)
     cfg = load_config(path)
@@ -260,6 +291,56 @@ def find_account(cfg: dict[str, Any], name: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_chat_color(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("#"):
+        raw = f"#{raw}"
+    if HEX_COLOR_RE.match(raw):
+        return raw.upper()
+    return None
+
+
+def default_chat_color_for_index(index: int) -> str:
+    return DEFAULT_CHAT_NAME_COLORS[index % len(DEFAULT_CHAT_NAME_COLORS)]
+
+
+def assign_chat_colors(
+    accounts: list[dict[str, Any]],
+    *,
+    overwrite: bool = False,
+) -> int:
+    """Assign chat_name_color ke tiap akun. Return jumlah akun yang diubah."""
+    changed = 0
+    for index, acc in enumerate(accounts):
+        if not overwrite and str(acc.get("chat_name_color") or "").strip():
+            continue
+        acc["chat_name_color"] = default_chat_color_for_index(index)
+        changed += 1
+    return changed
+
+
+def print_chat_colors(accounts: list[dict[str, Any]], *, resolved: bool = False) -> None:
+    if not accounts:
+        print("Belum ada akun.")
+        return
+    print("\nWarna nickname chat:")
+    for index, acc in enumerate(accounts):
+        name = str(acc.get("name") or f"acc{index + 1}")
+        color = str(acc.get("chat_name_color") or "").strip()
+        if not color and resolved:
+            color = default_chat_color_for_index(index)
+            note = " (auto saat bot jalan)"
+        elif not color:
+            color = default_chat_color_for_index(index)
+            note = " (belum disimpan — auto saat bot jalan)"
+        else:
+            note = ""
+        print(f"  {name}: {color}{note}")
+    print("\nPalet default:", ", ".join(DEFAULT_CHAT_NAME_COLORS))
+
+
 def validate_config(cfg: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if not str(cfg.get("sm_box_id") or "").strip():
@@ -283,6 +364,9 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(f"Akun '{name}': login.email wajib.")
         if not str(login.get("password") or "").strip():
             errors.append(f"Akun '{name}': login.password wajib.")
+        color = str(acc.get("chat_name_color") or "").strip()
+        if color and not normalize_chat_color(color):
+            errors.append(f"Akun '{name}': chat_name_color tidak valid (pakai hex, mis. #FF6D1C).")
     return errors
 
 
@@ -370,6 +454,7 @@ def build_accounts_from_emails(
                 "anchor_id": anchor_id,
                 "login": {"email": email, "password": password},
                 "cookies_file": f"cookies_bot{index}.json",
+                "chat_name_color": default_chat_color_for_index(index - 1),
             }
         )
     return accounts
@@ -459,6 +544,7 @@ def cmd_quick_update(args: argparse.Namespace) -> int:
     print("  2. Proxy semua akun")
     print("  3. Password semua akun")
     print("  4. Tambah akun (email baru)")
+    print("  5. Warna chat akun")
     print("  0. Batal")
     choice = input("\nPilih: ").strip()
 
@@ -509,9 +595,15 @@ def cmd_quick_update(args: argparse.Namespace) -> int:
                 "anchor_id": anchor_id,
                 "login": {"email": email, "password": password},
                 "cookies_file": f"cookies_bot{index}.json",
+                "chat_name_color": default_chat_color_for_index(index - 1),
             }
             accounts.append(entry)
         cfg["accounts"] = accounts
+    elif choice == "5":
+        if not accounts:
+            print("Belum ada akun.")
+            return 1
+        return cmd_colors(args)
     else:
         print("Pilihan tidak valid.")
         return 1
@@ -624,6 +716,7 @@ def cmd_account_add(args: argparse.Namespace) -> int:
     }
     if proxy:
         entry["proxy"] = proxy
+    entry["chat_name_color"] = default_chat_color_for_index(len(accounts))
     accounts.append(entry)
     save_config(path, cfg)
     return 0
@@ -639,6 +732,11 @@ def cmd_account_edit(args: argparse.Namespace) -> int:
 
     login = acc.setdefault("login", {})
     print(f"\nEdit akun '{args.name}' (Enter = keep)\n")
+    accounts = cfg.get("accounts") or []
+    acc_index = next(
+        (index for index, item in enumerate(accounts) if item.get("name") == args.name),
+        0,
+    )
     new_name = prompt("name", str(acc.get("name") or ""))
     if new_name != args.name and find_account(cfg, new_name):
         eprint(f"Nama '{new_name}' sudah dipakai.")
@@ -653,6 +751,16 @@ def cmd_account_edit(args: argparse.Namespace) -> int:
         acc["proxy"] = proxy
     elif "proxy" in acc:
         del acc["proxy"]
+    default_color = str(
+        acc.get("chat_name_color") or default_chat_color_for_index(acc_index)
+    )
+    color = prompt("chat_name_color (hex)", default_color)
+    normalized = normalize_chat_color(color)
+    if normalized:
+        acc["chat_name_color"] = normalized
+    elif color.strip():
+        eprint(f"Warna tidak valid: {color!r}. Gunakan format #RRGGBB.")
+        return 1
     acc["cookies_file"] = str(acc.get("cookies_file") or f"cookies_{new_name}.json")
     save_config(path, cfg)
     return 0
@@ -687,7 +795,8 @@ def cmd_account_list(args: argparse.Namespace) -> int:
         if not args.reveal and proxy != "-" and "@" in str(proxy):
             proxy = re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", str(proxy))
         print(
-            f"- {acc.get('name')}: {login.get('email')} | anchor={acc.get('anchor_id')} | proxy={proxy}"
+            f"- {acc.get('name')}: {login.get('email')} | anchor={acc.get('anchor_id')} "
+            f"| warna={acc.get('chat_name_color') or '-'} | proxy={proxy}"
         )
     return 0
 
@@ -777,6 +886,130 @@ def cmd_proxy_test(args: argparse.Namespace) -> int:
     return 0 if ok == with_proxy else 1
 
 
+def cmd_colors_list(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    cfg = load_config(path)
+    accounts = cfg.get("accounts") or []
+    print_chat_colors(accounts)
+    return 0
+
+
+def cmd_colors_auto(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    cfg = load_config(path)
+    accounts = cfg.get("accounts") or []
+    if not accounts:
+        eprint("Belum ada akun.")
+        return 1
+    overwrite = bool(getattr(args, "overwrite", False))
+    if overwrite and not getattr(args, "yes", False):
+        if not prompt_bool("Timpa semua warna yang sudah ada?", False):
+            print("Dibatalkan.")
+            return 1
+    changed = assign_chat_colors(accounts, overwrite=overwrite)
+    save_config(path, cfg)
+    print(f"Warna diassign ke {changed} akun.")
+    print_chat_colors(accounts)
+    return 0
+
+
+def cmd_colors_set(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    cfg = load_config(path)
+    acc = find_account(cfg, args.name)
+    if not acc:
+        eprint(f"Akun '{args.name}' tidak ditemukan.")
+        return 1
+
+    color_raw = args.color or prompt_required(
+        f"Warna hex untuk {args.name}",
+        str(acc.get("chat_name_color") or ""),
+    )
+    color = normalize_chat_color(color_raw)
+    if not color:
+        eprint(f"Warna tidak valid: {color_raw!r}. Gunakan format #RRGGBB.")
+        return 1
+    acc["chat_name_color"] = color
+    save_config(path, cfg)
+    print(f"{args.name} → {color}")
+    return 0
+
+
+def cmd_colors_edit(args: argparse.Namespace) -> int:
+    path = Path(args.config)
+    cfg = load_config(path)
+    accounts = cfg.get("accounts") or []
+    if not accounts:
+        eprint("Belum ada akun.")
+        return 1
+
+    print("\n=== Edit warna per akun ===\n")
+    print("Palet:", ", ".join(DEFAULT_CHAT_NAME_COLORS))
+    print("Enter = lewati akun, kosongkan = pakai warna default urutan\n")
+    for index, acc in enumerate(accounts):
+        name = str(acc.get("name") or f"acc{index + 1}")
+        current = str(acc.get("chat_name_color") or default_chat_color_for_index(index))
+        value = prompt(f"{name}", current)
+        if not value.strip():
+            continue
+        color = normalize_chat_color(value)
+        if not color:
+            eprint(f"Warna tidak valid: {value!r}. Lewati {name}.")
+            continue
+        acc["chat_name_color"] = color
+    save_config(path, cfg)
+    print("\nDisimpan.")
+    print_chat_colors(accounts)
+    return 0
+
+
+def cmd_colors(args: argparse.Namespace) -> int:
+    """Menu interaktif kelola warna chat."""
+    path = Path(args.config)
+    while True:
+        cfg = load_config(path)
+        accounts = cfg.get("accounts") or []
+        print("\n=== Warna Chat Akun ===")
+        print("  1. Lihat warna saat ini")
+        print("  2. Auto-assign warna berbeda (akun tanpa warna saja)")
+        print("  3. Auto-assign ulang semua akun")
+        print("  4. Edit warna per akun")
+        print("  5. Set warna 1 akun")
+        print("  0. Kembali")
+        choice = input("\nPilih: ").strip()
+        if choice == "0":
+            return 0
+        if choice == "1":
+            print_chat_colors(accounts)
+        elif choice == "2":
+            changed = assign_chat_colors(accounts, overwrite=False)
+            save_config(path, cfg)
+            print(f"Warna diassign ke {changed} akun.")
+            print_chat_colors(accounts)
+        elif choice == "3":
+            if prompt_bool("Timpa semua warna yang sudah ada?", False):
+                changed = assign_chat_colors(accounts, overwrite=True)
+                save_config(path, cfg)
+                print(f"Warna diassign ulang ke {changed} akun.")
+                print_chat_colors(accounts)
+            else:
+                print("Dibatalkan.")
+        elif choice == "4":
+            cmd_colors_edit(args)
+        elif choice == "5":
+            if not accounts:
+                print("Belum ada akun.")
+                continue
+            names = [str(a.get("name")) for a in accounts]
+            print("Akun:", ", ".join(names))
+            name = prompt_required("Nama akun", names[0])
+            set_args = argparse.Namespace(config=args.config, name=name, color=None)
+            cmd_colors_set(set_args)
+        else:
+            print("Pilihan tidak valid.")
+        input("\nTekan Enter...")
+
+
 def cmd_set_sm_box(args: argparse.Namespace) -> int:
     path = Path(args.config)
     cfg = load_config(path)
@@ -820,6 +1053,43 @@ def register_config_commands(
     p_sm = sub.add_parser("set-sm-box", help="Set sm_box_id global", parents=parents)
     p_sm.add_argument("value", nargs="?", help="Nilai sm_box_id")
     p_sm.set_defaults(func=cmd_set_sm_box)
+
+    p_colors = sub.add_parser(
+        "colors",
+        help="Kelola warna nickname chat per akun",
+        parents=parents,
+    )
+    colors_sub = p_colors.add_subparsers(dest="colors_cmd")
+
+    p_colors.set_defaults(func=cmd_colors, colors_cmd=None)
+
+    p_colors_list = colors_sub.add_parser("list", help="Lihat warna tiap akun", parents=parents)
+    p_colors_list.set_defaults(func=cmd_colors_list, colors_cmd="list")
+
+    p_colors_auto = colors_sub.add_parser(
+        "auto",
+        help="Assign warna default ke akun",
+        parents=parents,
+    )
+    p_colors_auto.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Timpa warna yang sudah ada",
+    )
+    p_colors_auto.add_argument("-y", "--yes", action="store_true", help="Tanpa konfirmasi")
+    p_colors_auto.set_defaults(func=cmd_colors_auto, colors_cmd="auto")
+
+    p_colors_edit = colors_sub.add_parser(
+        "edit",
+        help="Edit warna semua akun (interaktif)",
+        parents=parents,
+    )
+    p_colors_edit.set_defaults(func=cmd_colors_edit, colors_cmd="edit")
+
+    p_colors_set = colors_sub.add_parser("set", help="Set warna 1 akun", parents=parents)
+    p_colors_set.add_argument("name", help="Nama akun")
+    p_colors_set.add_argument("color", nargs="?", help="Hex warna, mis. #FF6D1C")
+    p_colors_set.set_defaults(func=cmd_colors_set, colors_cmd="set")
 
     p_acc = sub.add_parser("account", help="Kelola akun", parents=parents)
     acc_sub = p_acc.add_subparsers(dest="account_cmd", required=True)

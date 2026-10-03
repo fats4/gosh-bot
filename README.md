@@ -71,6 +71,7 @@ python3 gosh.py
 | **3. Sync proxy** | Baca ulang `proxies.txt` → assign ke akun |
 | **4. Cek status** | Validasi config |
 | **5. Lihat config** | Tampilkan config (password di-mask) |
+| **6. Warna chat** | Atur warna nickname per akun bot |
 
 ### Perintah langsung
 
@@ -82,6 +83,9 @@ python3 gosh.py status           # status bot & config
 python3 gosh.py login test       # tes login semua akun
 python3 gosh.py config quick     # setup cepat
 python3 gosh.py config proxy from-file   # sync proxy dari txt
+python3 gosh.py config colors            # menu warna chat akun
+python3 gosh.py config colors auto       # auto-assign warna berbeda
+python3 gosh.py config colors set asisten1 "#FF6D1C"
 python3 gosh.py config proxy test        # tes koneksi proxy
 python3 gosh.py config validate
 ```
@@ -203,6 +207,7 @@ python3 gosh.py config set-sm-box "DeyJ..."
 | `accounts[].anchor_id` | ✅ | ID channel yang dipantau |
 | `accounts[].login` | ✅ | Email + password Gosh |
 | `accounts[].proxy` | — | HTTP proxy per akun (auto dari `proxies.txt`) |
+| `accounts[].chat_name_color` | — | Warna nickname di chat live (hex, mis. `#FF6D1C`). Auto beda tiap akun jika kosong |
 | `sm_box_id` | ✅ | Token browser anti-bot |
 | `proxy_list_file` | — | Path file proxy (default: `proxies.txt`) |
 | `proxy_username` | — | Username ProxyScrape (jika proxy format `host:port`) |

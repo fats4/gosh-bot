@@ -18,11 +18,25 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function joinStatusOk(status) {
+  return status === 200 || status === 204;
+}
+
+function hasJoinOk(joinResults) {
+  return joinResults.some(function (item) {
+    return (
+      String(item.url || "").indexOf("/live/join") !== -1 &&
+      joinStatusOk(Number(item.status))
+    );
+  });
+}
+
 async function main() {
   const cfg = readConfig();
   const url = cfg.url;
   const watchSeconds = Number(cfg.watch_seconds || 15);
   const cookies = cfg.cookies || [];
+  const gotoTimeout = Number(cfg.goto_timeout || 90000);
   if (!url || watchSeconds <= 0) {
     throw new Error("Missing required fields: url, watch_seconds");
   }
@@ -50,7 +64,7 @@ async function main() {
     );
     await page.setViewport({ width: 1280, height: 720 });
 
-    page.on("response", async (response) => {
+    page.on("response", async function (response) {
       try {
         const reqUrl = response.url();
         if (
@@ -88,17 +102,47 @@ async function main() {
       );
     }
 
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
+    const startedAt = Date.now();
 
-    await sleep(watchSeconds * 1000);
+    const joinWait = page
+      .waitForResponse(
+        function (response) {
+          return (
+            response.url().indexOf("/gosh_base/app/live/join") !== -1 &&
+            response.request().method() === "POST" &&
+            joinStatusOk(response.status())
+          );
+        },
+        { timeout: gotoTimeout }
+      )
+      .catch(function () {
+        return null;
+      });
+
+    try {
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: gotoTimeout,
+      });
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      if (msg.indexOf("timeout") === -1 && msg.indexOf("TIMED_OUT") === -1) {
+        throw err;
+      }
+    }
+
+    await joinWait;
+    const elapsedMs = Date.now() - startedAt;
+    const remainMs = Math.max(watchSeconds * 1000 - elapsedMs, 0);
+    if (remainMs > 0) {
+      await sleep(remainMs);
+    }
 
     process.stdout.write(
       JSON.stringify({
         ok: true,
         watched: watchSeconds,
+        joined: hasJoinOk(joinResults),
         join_results: joinResults,
       })
     );
